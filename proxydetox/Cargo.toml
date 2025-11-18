@@ -32,6 +32,10 @@ tokio-rustls.workspace = true
 rustls-pemfile.workspace = true
 rustls.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+gio = { version = "0.20.1", features = ["v2_72"] }
+glib = { version = "0.20.1" }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_System",
