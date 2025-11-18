@@ -5,8 +5,11 @@
 
 mod options;
 
-use detox_auth::AuthenticatorFactory;
+#[cfg(unix)]
+mod gnome;
+
 use detox_auth::netrc;
+use detox_auth::AuthenticatorFactory;
 use futures_util::future;
 use futures_util::stream;
 use options::{Authorization, Options};
@@ -154,6 +157,10 @@ async fn run(config: Arc<Options>) -> Result<(), proxydetoxlib::Error> {
         .client_tcp_keepalive(config.client_tcp_keepalive.clone())
         .build();
 
+    if !cfg!(unix) || !config.gnome_wpad {
+        context.load_pac_file(&config.pac_file).await?;
+    }
+
     if let Some(my_ip) = config.my_ip_address {
         context.set_my_ip_address(my_ip).await?;
     }
@@ -188,12 +195,43 @@ async fn run(config: Arc<Options>) -> Result<(), proxydetoxlib::Error> {
 
     tracing::info!(listening=?addrs, pac_file=?config.pac_file, "starting");
 
+    #[cfg(unix)]
+    let mut wpad_receiver = if config.gnome_wpad {
+        match gnome::monitor_gsettings_proxy() {
+            Ok(rx) => {
+                tracing::info!("Monitoring GNOME proxy settings for WPAD...");
+                Some(rx)
+            }
+            Err(e) => {
+                tracing::error!("Failed to initialize GNOME settings monitor: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let server = tokio::spawn(async move { server.run().await });
     tokio::pin!(server);
     let joiner = loop {
         tokio::select! {
+            #[cfg(unix)]
+            Some(wpad_url) = async {
+                if let Some(ref mut rx) = wpad_receiver {
+                    rx.recv().await
+                } else {
+                    futures_util::future::pending().await
+                }
+            } => {
+                tracing::info!(new_pac_url = ?wpad_url, "Received new WPAD configuration from GNOME");
+                if let Err(e) = context.load_pac_file(&wpad_url).await {
+                    tracing::error!("Failed to apply new PAC file from GNOME settings: {}", e);
+                }
+            },
             _ = reload_trigger() => {
-                context.load_pac_file(&config.pac_file).await?;
+                if !cfg!(unix) || !config.gnome_wpad {
+                    context.load_pac_file(&config.pac_file).await?;
+                }
                 context.set_my_ip_address(my_ip_address()).await?;
             },
             _ = direct_mode_trigger() => {
@@ -235,7 +273,7 @@ async fn run(config: Arc<Options>) -> Result<(), proxydetoxlib::Error> {
 
 #[cfg(unix)]
 async fn reload_trigger() {
-    use tokio::signal::unix::{SignalKind, signal};
+    use tokio::signal::unix::{signal, SignalKind};
     let sighup = signal(SignalKind::hangup());
     match sighup {
         Ok(mut sighup) => {
@@ -254,7 +292,7 @@ async fn reload_trigger() {
 
 #[cfg(unix)]
 async fn direct_mode_trigger() {
-    use tokio::signal::unix::{SignalKind, signal};
+    use tokio::signal::unix::{signal, SignalKind};
     let sigusr1 = signal(SignalKind::user_defined1());
     match sigusr1 {
         Ok(mut sigusr1) => {
@@ -273,7 +311,7 @@ async fn direct_mode_trigger() {
 
 #[cfg(unix)]
 async fn shutdown_trigger() {
-    use tokio::signal::unix::{SignalKind, signal};
+    use tokio::signal::unix::{signal, SignalKind};
     let signals = vec![
         signal(SignalKind::interrupt()),
         signal(SignalKind::terminate()),
