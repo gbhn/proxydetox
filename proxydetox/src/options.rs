@@ -43,6 +43,8 @@ pub struct Options {
     pub client_tcp_keepalive: TcpKeepAlive,
     #[allow(dead_code)]
     pub server_tcp_keepalive: TcpKeepAlive,
+    #[cfg(unix)]
+    pub gnome_wpad: bool,
     pub graceful_shutdown_timeout: Duration,
 }
 
@@ -140,6 +142,14 @@ impl Options {
             Arg::new("attach_console")
                 .long("attach-console")
                 .help("Attache to the console of the parent process")
+                .action(ArgAction::SetTrue),
+        );
+
+        #[cfg(unix)]
+        let app = app.arg(
+            Arg::new("no_gnome_wpad")
+                .long("no-gnome-wpad")
+                .help("Do not automatically use WPAD settings from GNOME (gsettings)")
                 .action(ArgAction::SetTrue),
         );
 
@@ -362,6 +372,21 @@ impl From<ArgMatches> for Options {
             }
         };
 
+        let pac_file_arg = m.get_one::<PathOrUri>("pac_file").cloned();
+
+        #[cfg(unix)]
+        let no_gnome_wpad = m.get_flag("no_gnome_wpad");
+        #[cfg(not(unix))]
+        let no_gnome_wpad = true;
+
+        let use_gnome_wpad = !no_gnome_wpad && pac_file_arg.is_none();
+
+        let pac_file = if use_gnome_wpad {
+            None
+        } else {
+            pac_file_arg.or_else(|| which_pac_file().map(PathOrUri::Path))
+        };
+
         let client_tcp_keepalive = TcpKeepAlive::new()
             .with_time(
                 m.get_one::<f64>("client_tcp_keepalive_time")
@@ -388,10 +413,7 @@ impl From<ArgMatches> for Options {
             attach_console: m.get_flag("attach_console"),
             log_level,
             log_filepath: m.get_one("log_filepath").cloned(),
-            pac_file: m
-                .get_one::<PathOrUri>("pac_file")
-                .cloned()
-                .or_else(|| which_pac_file().map(PathOrUri::Path)),
+            pac_file,
             my_ip_address: m.get_one::<IpAddr>("my_ip_address").cloned(),
             authorization,
             proxytunnel: m.get_flag("proxytunnel"),
@@ -409,6 +431,8 @@ impl From<ArgMatches> for Options {
             listen,
             client_tcp_keepalive,
             server_tcp_keepalive,
+            #[cfg(unix)]
+            gnome_wpad: use_gnome_wpad,
             graceful_shutdown_timeout: m
                 .get_one::<u64>("graceful_shutdown_timeout")
                 .map(|s| Duration::from_secs(*s))
